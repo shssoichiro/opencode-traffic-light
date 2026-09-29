@@ -1,6 +1,6 @@
 {
   "name": "opencode-traffic-light",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "TUI plugin that adds a traffic-light status indicator to your OpenCode terminal title",
   "type": "module",
   "license": "MIT",
@@ -18,10 +18,24 @@
   "exports": {
     "./tui": "./src/index.ts"
   },
+  "scripts": {
+    "test": "bun --conditions=browser test",
+    "typecheck": "tsc --noEmit"
+  },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.0.0"
+    "@opencode/plugin": ">=2.0.19 <3",
+    "solid-js": ">=1.9.0 <2"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.19",
+    "@opencode/theme": "2.0.19",
+    "@opentui/core": "0.5.12",
+    "@opentui/solid": "0.5.12",
+    "@types/bun": "1.4.2",
+    "solid-js": "1.9.12",
+    "typescript": "7.0.2"
   },
   "engines": {
-    "opencode": ">=1.0.0"
+    "opencode": ">=2.0.19 <3"
   }
 }

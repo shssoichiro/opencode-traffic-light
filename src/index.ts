@@ -1,148 +1,167 @@
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
+import { createEffect, onCleanup } from "solid-js"
 
-type TrafficLightColor = "green" | "yellow" | "red"
+export type TrafficLightColor = "green" | "yellow" | "red"
 
-type TrafficLightInput = {
-  enabled: boolean
-  sessionStatus?: { type: string }
-  messages?: readonly { role: string; id: string }[]
-  pendingInput: boolean
-  parts?: readonly {
-    type: string
-    state?: { status?: string }
-    synthetic?: boolean
-    ignored?: boolean
-  }[]
+// Structural inputs so the policy stays testable without SDK types. V2
+// assistant content assigns directly: tool parts carry `state.status`
+// ("streaming" | "running" | "completed" | "error"); text/reasoning parts are
+// recognized by `type` alone.
+export type TrafficLightPart =
+  | { readonly type: "tool"; readonly state?: { readonly status?: string } }
+  | { readonly type: "text"; readonly text?: string }
+  | { readonly type: "reasoning"; readonly text?: string }
+
+export type TrafficLightMessage = { readonly type: string }
+
+export type TrafficLightInput = {
+  readonly enabled: boolean
+  readonly sessionStatus?: string
+  readonly messages?: readonly TrafficLightMessage[]
+  readonly pendingInput: boolean
+  readonly parts?: readonly TrafficLightPart[]
 }
 
-function computeTrafficLight(input: TrafficLightInput): TrafficLightColor | null {
+export function computeTrafficLight(input: TrafficLightInput): TrafficLightColor | null {
   if (!input.enabled) return null
-  if (!input.sessionStatus || input.sessionStatus.type === "idle") return "green"
+  if (!input.sessionStatus || input.sessionStatus === "idle") return "green"
   if (!input.messages || input.messages.length === 0) return "green"
   if (input.pendingInput) return "green"
 
-  const lastAssistant = [...input.messages].reverse().find(m => m.role === "assistant")
-  if (!lastAssistant) return "yellow"
+  if (!input.messages.some((message) => message.type === "assistant")) return "yellow"
   if (!input.parts || input.parts.length === 0) return "yellow"
 
+  // V1 parity: "streaming" replaces the old "pending" as the not-yet-running
+  // tool state; both count as active.
   const hasActiveTool = input.parts.some(
-    p => p.type === "tool" && (p.state?.status === "running" || p.state?.status === "pending"),
+    (part) =>
+      part.type === "tool" && (part.state?.status === "running" || part.state?.status === "streaming"),
   )
   if (hasActiveTool) return "red"
 
-  const hasActiveText = input.parts.some(
-    p => p.type === "text" && !p.synthetic && !p.ignored,
-  )
-  if (hasActiveText) return "red"
+  // V1 parity: text presence decides red, not whether the text is still growing.
+  if (input.parts.some((part) => part.type === "text")) return "red"
 
   return "yellow"
 }
 
-function statusEmoji(color: TrafficLightColor | null): string {
+export function statusEmoji(color: TrafficLightColor | null): string {
   if (color === "green") return "\u{1F7E2}"
   if (color === "yellow") return "\u{1F7E1}"
   if (color === "red") return "\u{1F534}"
   return ""
 }
 
-const EVENTS = [
-  "session.status",
-  "session.idle",
-  "message.updated",
-  "message.part.updated",
-  "message.part.delta",
-  "permission.asked",
-  "permission.replied",
-  "question.asked",
-  "question.replied",
-  "session.next.tool.called",
-  "session.next.tool.success",
-  "session.next.tool.failed",
-  "session.next.text.started",
-  "session.next.text.ended",
-] as const
-
-const tui: TuiPlugin = async (api) => {
-  if (process.env.OPENCODE_DISABLE_TERMINAL_TITLE === "1") return
-
-  const KV_KEY = "traffic_light_enabled"
-  let enabled = api.kv.get<boolean>(KV_KEY, true)
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  function scheduleUpdate() {
-    if (timer !== undefined) clearTimeout(timer)
-    timer = setTimeout(doUpdateTitle, 0)
-  }
-
-  function doUpdateTitle() {
-    timer = undefined
-    const route = api.route.current
-    if (route.name !== "session") {
-      api.renderer.setTerminalTitle("OpenCode")
-      return
-    }
-
-    const sessionID = route.params.sessionID
-    const status = api.state.session.status(sessionID)
-    const messages = api.state.session.messages(sessionID)
-    const permissions = api.state.session.permission(sessionID)
-    const questions = api.state.session.question(sessionID)
-    const lastAssistant = messages && [...messages].reverse().find(m => m.role === "assistant")
-    const parts = lastAssistant ? api.state.part(lastAssistant.id) : undefined
-
-    const color = computeTrafficLight({
-      enabled,
-      sessionStatus: status ?? undefined,
-      messages,
-      pendingInput: permissions.length > 0 || questions.length > 0,
-      parts,
-    })
-    const emoji = statusEmoji(color)
-
-    const session = api.state.session.get(sessionID)
-    const isDefaultTitle = !session?.title || session.title.trim() === ""
-    if (isDefaultTitle) {
-      api.renderer.setTerminalTitle(`${emoji} OpenCode`)
-      return
-    }
-
-    const title =
-      session!.title.length > 40 ? session!.title.slice(0, 37) + "..." : session!.title
-    api.renderer.setTerminalTitle(`${emoji} OC | ${title}`)
-  }
-
-  const unsubscribers = EVENTS.map((event) => api.event.on(event, () => scheduleUpdate()))
-
-  api.keymap.registerLayer({
-    commands: [
-      {
-        name: "traffic_light.toggle",
-        title: "Toggle traffic light",
-        category: "Plugin",
-        namespace: "palette",
-        run() {
-          enabled = !enabled
-          api.kv.set(KV_KEY, enabled)
-          api.ui.toast({
-            variant: "info",
-            message: `Traffic light ${enabled ? "enabled" : "disabled"}`,
-          })
-          scheduleUpdate()
-        },
-      },
-    ],
-    bindings: [],
-  })
-
-  api.lifecycle.onDispose(() => {
-    if (timer !== undefined) clearTimeout(timer)
-    unsubscribers.forEach((fn) => fn())
-  })
+// V1 parity: blank titles fall back to "OpenCode"; titles over 40 UTF-16 code
+// units truncate to 37 + "...". Disabled (null color) drops the emoji and the
+// incidental leading space the V1 template string produced.
+export function formatSessionTitle(title: string | undefined, color: TrafficLightColor | null): string {
+  const base =
+    !title || title.trim() === ""
+      ? "OpenCode"
+      : `OC | ${title.length > 40 ? title.slice(0, 37) + "..." : title}`
+  const emoji = statusEmoji(color)
+  return emoji ? `${emoji} ${base}` : base
 }
 
-const plugin: TuiPluginModule & { id: string } = {
+export default Plugin.define({
   id: "opencode-traffic-light",
-  tui,
-}
+  setup(context) {
+    // V1 parity: hard opt-out before registering anything. There is no public
+    // V2 API for the native terminal.title setting, so this env var remains
+    // the only supported guarantee against title writes.
+    if (process.env.OPENCODE_DISABLE_TERMINAL_TITLE === "1") return
 
-export default plugin
+    // New plugin-scoped V2 storage namespace: the V1 boolean is not migrated,
+    // so an upgrade starts enabled once (accepted behavior).
+    const [settings, updateSettings] = context.storage.store("traffic_light_enabled", {
+      initial: { enabled: true },
+    })
+
+    // The slot renders nothing visible. It exists so the keymap layer, title
+    // effect, and cleanup below are created under a Solid owner and are
+    // disposed when the plugin unloads or hot-reloads.
+    return context.ui.slot({
+      append: "app",
+      render() {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let disposed = false
+
+        const toast = (message: string, variant: "info" | "error") => {
+          if (disposed || context.renderer.isDestroyed) return
+          context.ui.toast.show({ message, variant })
+        }
+
+        context.keymap.layer(() => ({
+          mode: "global",
+          commands: [
+            {
+              id: "traffic_light.toggle",
+              title: "Toggle traffic light",
+              group: "Plugin",
+              palette: true,
+              async run() {
+                const enabled = settings.enabled !== false
+                try {
+                  await updateSettings((draft) => {
+                    draft.enabled = !enabled
+                  })
+                } catch {
+                  toast("Could not save traffic light preference", "error")
+                  return
+                }
+                toast(`Traffic light ${!enabled ? "enabled" : "disabled"}`, "info")
+              },
+            },
+          ],
+          bindings: [],
+        }))
+
+        createEffect(() => {
+          // All reactive reads happen synchronously here; only the terminal
+          // write is deferred one macrotask so it lands after OpenCode's own
+          // title effect for this frame. Successive runs coalesce into a
+          // single write. The route is shallow-spread so plugin-page name
+          // changes are tracked even though `type` stays "plugin".
+          const route = { ...context.ui.router.current() }
+          const enabled = settings.enabled !== false
+          let title: string
+          if (route.type !== "session") {
+            title = "OpenCode"
+          } else {
+            const sessionID = route.sessionID
+            const session = context.data.session.get(sessionID)
+            const messages = context.data.session.message.list(sessionID)
+            const permissions = context.data.session.permission.list(sessionID)
+            const forms = context.data.session.form.list(sessionID)
+            const lastAssistant = [...messages]
+              .reverse()
+              .find((message) => message.type === "assistant")
+            const color = computeTrafficLight({
+              enabled,
+              sessionStatus: context.data.session.status(sessionID),
+              messages,
+              pendingInput: (permissions?.length ?? 0) > 0 || (forms?.length ?? 0) > 0,
+              parts:
+                lastAssistant && "content" in lastAssistant ? lastAssistant.content : undefined,
+            })
+            title = formatSessionTitle(session?.title, color)
+          }
+          if (timer !== undefined) clearTimeout(timer)
+          timer = setTimeout(() => {
+            timer = undefined
+            if (disposed || context.renderer.isDestroyed) return
+            context.renderer.setTerminalTitle(title)
+          }, 0)
+        })
+
+        onCleanup(() => {
+          disposed = true
+          if (timer !== undefined) clearTimeout(timer)
+        })
+
+        return null
+      },
+    })
+  },
+})
