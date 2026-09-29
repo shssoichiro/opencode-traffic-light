@@ -4,34 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-An OpenCode TUI plugin that adds a 🟢🟡🔴 traffic-light status indicator to the terminal title bar. Single-file plugin at `src/index.ts` — no build step, no dependencies beyond the OpenCode plugin SDK peer dependency.
+An OpenCode **V2 CLI (TUI) plugin** that adds a 🟢🟡🔴 traffic-light status indicator to the terminal title bar. Single-file plugin at `src/index.ts` — no build step; OpenCode consumes the TypeScript source directly through the `./tui` package export. V2-only: V1 users stay on the 1.x release.
 
 ## Architecture
 
-The entire plugin lives in `src/index.ts` (~150 lines). Key design:
+The entire plugin lives in `src/index.ts`. Key design:
 
-- **`computeTrafficLight(input)`** — Pure function (no SDK imports) that decides the color based on session state. Uses structural typing so it's independently testable without the real SDK.
-- **`doUpdateTitle()`** — Reads state from the OpenCode TUI Plugin API (`api.state.session.*`, `api.state.part`, `api.route.current`) and sets the terminal title via `api.renderer.setTerminalTitle()`.
-- **`scheduleUpdate()`** — Debounces updates with `setTimeout(fn, 0)` so rapid events (e.g. `message.part.delta` streaming) are coalesced into a single title update per frame, and the title write happens after OpenCode's own title effect.
-- **14 event subscriptions** (`EVENTS` array) — Every relevant session/message/part/permission event triggers a debounced title refresh.
-- **Toggle** — Registered as a palette command ("Toggle traffic light"), persisted via `api.kv.get/set`.
-- **Disable** — Setting `OPENCODE_DISABLE_TERMINAL_TITLE=1` causes the plugin to exit early without registering any handlers.
+- **`computeTrafficLight(input)`** — Pure function (structural types, no SDK imports) that decides the color from session state. V2 shapes: messages are discriminated by `type` (not V1 `role`); assistant parts come from the newest assistant message's `content`; tool activity is `state.status === "streaming" | "running"` (V1 used `pending`/`running`). Exported for tests.
+- **`formatSessionTitle(title, color)`** — Pure title formatter: `OpenCode` for blank titles, `OC | <title>` for named titles, legacy truncation over 40 UTF-16 code units to first 37 + `...`, emoji prefix unless disabled (disabled has no leading space — a V1 quirk intentionally dropped). Exported for tests.
+- **`Plugin.define({ id, setup })`** from `@opencode/plugin/tui` — V2 CLI plugin entrypoint. `setup` exits early when `OPENCODE_DISABLE_TERMINAL_TITLE=1`, creates the persisted toggle (`storage.store("traffic_light_enabled")`, plugin-scoped, does NOT migrate the V1 kv value), and registers a non-rendering `app` slot.
+- **Slot ownership** — The null-rendering slot exists so the keymap layer (palette command `traffic_light.toggle`) and the title `createEffect` are created under a Solid owner and disposed on plugin unload/hot-reload. Do not move them into `setup` itself: `setup` runs without a component owner.
+- **Title effect** — Reads route/session/messages/permissions/forms/storage reactively and computes the title synchronously; only the `renderer.setTerminalTitle` write is deferred with `setTimeout(fn, 0)` so it lands after OpenCode's own title effect, coalescing rapid changes into one write. The route is shallow-spread (`{ ...current() }`) so plugin-page name changes retrigger even though `type` stays `"plugin"`.
+- **No event subscriptions, no polling** — the V2 client cache is reactive; updates flow through it. (V1 subscribed to 14 events; that machinery is gone.)
 
 ## Color Decision Priority (highest first)
 
-1. `enabled === false` → no title change
-2. Session idle or no session status → 🟢 green
+1. `enabled === false` → `null` (plain title still written, no emoji)
+2. Session idle or no status → 🟢 green
 3. No messages → 🟢 green
-4. Pending permission or question → 🟢 green
-5. No assistant message or no parts → 🟡 yellow
-6. Active (running/pending) tool part → 🔴 red
-7. Active (non-synthetic, non-ignored) text part → 🔴 red
+4. Pending permission or form (V2 replacement for questions) → 🟢 green
+5. No assistant message or empty parts → 🟡 yellow
+6. Active tool part (`streaming`/`running`) in newest assistant message → 🔴 red
+7. Text part present in newest assistant message → 🔴 red (presence, not still-streaming — V1 parity)
 8. Default → 🟡 yellow
 
-## Package Entry
+## Package Entry and Versioning
 
-The `exports` field in `package.json` maps `./tui` → `./src/index.ts`. OpenCode loads the plugin by reading this entry point. The default export must be a `TuiPluginModule` with an `id` and a `tui` async function.
+`exports["./tui"]` → `./src/index.ts`; there is deliberately no root/server export (CLI-only plugin). Peers: `@opencode/plugin >=2.0.19 <3`, `solid-js >=1.9.0 <2` (the host provides both at runtime — never bundle them). Version 2.0.0 is the breaking V2 migration; V1 remains available as 1.0.2. Installed via `plugins` in the **global** `cli.json`.
 
-## No Build/Lint/Test Tooling
+## Tests and Typecheck
 
-This project has no build scripts, test runner, or linter configured. TypeScript is used only for editor type-checking (`noEmit: true`). There is no `dist/` — OpenCode consumes the TypeScript source directly.
+- `bun run test` — Bun test runner over `tests/index.test.ts` against a fake `Plugin.Context`. The `--conditions=browser` flag is required: without it Bun resolves solid-js to its inert server build and reactivity silently does nothing.
+- `bun run typecheck` — strict `tsc --noEmit`; tsconfig sets `"types": ["bun"]` because TypeScript 7 here does not auto-include `@types`.
+- Dev dependencies pin SDK 2.0.19 / OpenTUI 0.5.12 / solid-js 1.9.12 (OpenTUI's exact Solid peer) purely for type resolution.

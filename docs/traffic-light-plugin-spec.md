@@ -1,5 +1,12 @@
 # Traffic Light Plugin (红绿灯插件)
 
+> **历史文档（V1）/ Historical document (V1).** This spec describes the original
+> OpenCode **V1** TUI plugin. The embedded implementation no longer matches
+> `src/index.ts`: the plugin was migrated to the OpenCode V2 CLI plugin API
+> (`Plugin.define`, reactive cached state, V2 storage). See `README.md` and
+> `CLAUDE.md` for the current design. Kept as background on the color logic,
+> the terminal-title race, and the V1 API mapping.
+
 通过 TUI 插件实现终端标题栏状态指示灯，实时反映 opencode 当前工作状态。
 
 ## 安装
