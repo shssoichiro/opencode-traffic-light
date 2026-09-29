@@ -101,16 +101,19 @@ export default Plugin.define({
               group: "Plugin",
               palette: true,
               async run() {
-                const enabled = settings.enabled !== false
+                // Invert inside the mutation, against the freshly loaded
+                // value: overlapping toggles must not lose an update.
+                let next = settings.enabled !== false
                 try {
                   await updateSettings((draft) => {
-                    draft.enabled = !enabled
+                    next = !(draft.enabled !== false)
+                    draft.enabled = next
                   })
                 } catch {
                   toast("Could not save traffic light preference", "error")
                   return
                 }
-                toast(`Traffic light ${!enabled ? "enabled" : "disabled"}`, "info")
+                toast(`Traffic light ${next ? "enabled" : "disabled"}`, "info")
               },
             },
           ],

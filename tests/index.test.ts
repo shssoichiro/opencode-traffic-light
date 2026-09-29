@@ -423,6 +423,21 @@ test("plugin_persists_toggle_and_honors_environment_opt_out", async () => {
   flushTimers()
   expect(h.titles.at(-1)).toBe("\u{1F7E2} OpenCode")
 
+  // overlapping toggles must not lose an update: the inversion has to happen
+  // inside the mutation against the freshly loaded value
+  let resolveFirst!: () => void
+  h.setUpdateGate(new Promise<void>((resolve) => (resolveFirst = resolve)))
+  const first = Promise.resolve(h.toggleCommand().run())
+  const second = Promise.resolve(h.toggleCommand().run())
+  resolveFirst()
+  h.setUpdateGate(undefined)
+  await Promise.all([first, second])
+  expect(h.getSettings().enabled).toBe(true)
+  expect(h.toasts.slice(-2).map((t) => t.message)).toEqual([
+    "Traffic light disabled",
+    "Traffic light enabled",
+  ])
+
   // a rejected persistence keeps the effective state and shows only an error
   h.setStorageError(new Error("disk locked"))
   const toastsBefore = h.toasts.length
