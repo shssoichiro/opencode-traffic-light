@@ -6,11 +6,15 @@ A TUI plugin that adds a status indicator to your terminal title bar, giving you
 
 | Color | Meaning |
 |-------|---------|
-| 🟢 Green | Idle, waiting for input, or pending permission/question |
-| 🟡 Yellow | Busy but no active tool or text output (thinking/reasoning) |
-| 🔴 Red | Running tools or producing text |
+| 🟢 Green | Fully idle, or waiting for permission/question input |
+| 🟡 Yellow | Thinking/reasoning, or foreground idle with background work remaining |
+| 🔴 Red | Foreground running tools or producing text |
 
 Red means the newest assistant message has a streaming/running tool call, or has produced text — a text part counts as active for the whole turn (behavior preserved from V1).
+
+After an agent responds, Yellow remains while a subagent or shell command is running anywhere in its session family (the root session and its children). This also applies when viewing a child session. Pending permission/question input anywhere in that family takes priority and shows Green; unrelated sessions do not count.
+
+The indicator follows OpenCode's reactive cache: reopening or reconnecting may briefly show Green before task state loads. It does not track unmanaged detached processes or shells at locations OpenCode has not loaded.
 
 ![demo](https://cdn.jsdelivr.net/gh/niushuai1991/opencode-traffic-light@main/demo.gif)
 
@@ -33,7 +37,7 @@ Add the package to your **global CLI config**: `~/.config/opencode/cli.json` (or
 That's it. OpenCode installs the plugin on next terminal start. The terminal title will look like:
 
 - `🟢 OC | My Session` — idle
-- `🟡 OC | My Session` — thinking
+- `🟡 OC | My Session` — thinking or background work remaining
 - `🔴 OC | My Session` — working
 
 Outside a session (home or a plugin page), the title stays plain `OpenCode`.

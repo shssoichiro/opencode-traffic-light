@@ -19,14 +19,17 @@ export type TrafficLightInput = {
   readonly sessionStatus?: string
   readonly messages?: readonly TrafficLightMessage[]
   readonly pendingInput: boolean
+  readonly backgroundActive?: boolean
   readonly parts?: readonly TrafficLightPart[]
 }
 
 export function computeTrafficLight(input: TrafficLightInput): TrafficLightColor | null {
   if (!input.enabled) return null
-  if (!input.sessionStatus || input.sessionStatus === "idle") return "green"
-  if (!input.messages || input.messages.length === 0) return "green"
   if (input.pendingInput) return "green"
+  // Foreground completion does not mean its family has finished background work.
+  if (!input.sessionStatus || input.sessionStatus === "idle")
+    return input.backgroundActive ? "yellow" : "green"
+  if (!input.messages || input.messages.length === 0) return "green"
 
   if (!input.messages.some((message) => message.type === "assistant")) return "yellow"
   if (!input.parts || input.parts.length === 0) return "yellow"
@@ -135,8 +138,25 @@ export default Plugin.define({
             const sessionID = route.sessionID
             const session = context.data.session.get(sessionID)
             const messages = context.data.session.message.list(sessionID)
-            const permissions = context.data.session.permission.list(sessionID)
-            const forms = context.data.session.form.list(sessionID)
+            // family() includes the root and siblings even when viewing a child.
+            const family = [...new Set([sessionID, ...context.data.session.family(sessionID)])]
+            const backgroundActive = family.some(
+              (id) =>
+                (id !== sessionID && context.data.session.status(id) === "running") ||
+                context.data.shell
+                  .list(
+                    context.data.session.get(id)?.location ??
+                      session?.location ??
+                      context.location ??
+                      context.data.location.default(),
+                  )
+                  .some((shell) => shell.status === "running" && shell.metadata.sessionID === id),
+            )
+            const pendingInput = family.some(
+              (id) =>
+                (context.data.session.permission.list(id)?.length ?? 0) > 0 ||
+                (context.data.session.form.list(id)?.length ?? 0) > 0,
+            )
             const lastAssistant = [...messages]
               .reverse()
               .find((message) => message.type === "assistant")
@@ -144,7 +164,8 @@ export default Plugin.define({
               enabled,
               sessionStatus: context.data.session.status(sessionID),
               messages,
-              pendingInput: (permissions?.length ?? 0) > 0 || (forms?.length ?? 0) > 0,
+              pendingInput,
+              backgroundActive,
               parts:
                 lastAssistant && "content" in lastAssistant ? lastAssistant.content : undefined,
             })

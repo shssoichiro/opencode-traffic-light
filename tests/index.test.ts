@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { createRoot } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { Plugin } from "@opencode/plugin/tui"
+import type { LocationRef } from "@opencode/client"
 import plugin, {
   computeTrafficLight,
   formatSessionTitle,
@@ -61,19 +62,25 @@ type RouteState =
 
 type Part = { type: string; state?: { status?: string }; text?: string }
 type Msg = { type: string; content?: Part[] }
+type Shell = { id: string; status: string; metadata: { sessionID?: unknown } }
 
 type FakeCommand = { id?: string; run: (input?: string) => unknown }
 type FakeLayer = { commands?: FakeCommand[] }
 
-function createHarness(route: RouteState = { type: "session", sessionID: "ses_a" }) {
+function createHarness(
+  route: RouteState = { type: "session", sessionID: "ses_a" },
+  location: LocationRef | null = { directory: "/plugin" },
+) {
   const [routeState, setRouteState] = createStore<RouteState>(route)
   const [state, setState] = createStore<{
-    sessions: Record<string, { title?: string }>
+    sessions: Record<string, { title?: string; parentID?: string; location?: LocationRef }>
+    families: Record<string, string[]>
+    shells: Record<string, Shell[]>
     statuses: Record<string, string>
     messages: Record<string, Msg[]>
     permissions: Record<string, unknown[] | undefined>
     forms: Record<string, unknown[] | undefined>
-  }>({ sessions: {}, statuses: {}, messages: {}, permissions: {}, forms: {} })
+  }>({ sessions: {}, families: {}, shells: {}, statuses: {}, messages: {}, permissions: {}, forms: {} })
   const [settings, setSettings] = createStore<{ enabled?: unknown }>({ enabled: true })
 
   const titles: string[] = []
@@ -88,6 +95,7 @@ function createHarness(route: RouteState = { type: "session", sessionID: "ses_a"
   let dispose: (() => void) | undefined
 
   const context = {
+    location: location ?? undefined,
     renderer: {
       get isDestroyed() {
         return rendererDestroyed
@@ -112,11 +120,18 @@ function createHarness(route: RouteState = { type: "session", sessionID: "ses_a"
     data: {
       session: {
         get: (id: string) => state.sessions[id],
+        family(id: string) {
+          let root = id
+          while (state.sessions[root]?.parentID) root = state.sessions[root]!.parentID!
+          return state.families[root] ?? []
+        },
         status: (id: string) => state.statuses[id] ?? "idle",
         message: { list: (id: string) => state.messages[id] ?? [] },
         permission: { list: (id: string) => state.permissions[id] },
         form: { list: (id: string) => state.forms[id] },
       },
+      shell: { list: (ref?: LocationRef) => state.shells[ref?.directory ?? "/default"] ?? [] },
+      location: { default: () => ({ directory: "/default" }) },
     },
     ui: {
       slot(c: { render: (input: unknown) => unknown }) {
@@ -255,7 +270,171 @@ test("traffic_light_v2_preserves_color_and_title_policy", () => {
   expect(computeTrafficLight(frozen)).toBe("red")
 })
 
+test("computeTrafficLight_background_activity_obeys_priority", () => {
+  const input = {
+    enabled: true,
+    sessionStatus: "idle",
+    pendingInput: false,
+    backgroundActive: true,
+    messages: [{ type: "assistant" }],
+    parts: [{ type: "text" as const, text: "Task started." }],
+  }
+  expect(computeTrafficLight(input)).toBe("yellow")
+  expect(computeTrafficLight({ ...input, backgroundActive: false })).toBe("green")
+  expect(computeTrafficLight({ ...input, pendingInput: true })).toBe("green")
+  expect(computeTrafficLight({ ...input, enabled: false })).toBeNull()
+  expect(computeTrafficLight({ ...input, sessionStatus: "running" })).toBe("red")
+  expect(
+    computeTrafficLight({
+      ...input,
+      sessionStatus: "running",
+      parts: [{ type: "tool", state: { status: "running" } }],
+    }),
+  ).toBe("red")
+  expect(computeTrafficLight({ ...input, sessionStatus: undefined })).toBe("yellow")
+  expect(computeTrafficLight({ ...input, messages: [] })).toBe("yellow")
+  expect(computeTrafficLight({ ...input, messages: undefined })).toBe("yellow")
+  expect(
+    computeTrafficLight({ ...input, parts: [{ type: "tool", state: { status: "running" } }] }),
+  ).toBe("yellow")
+})
+
 // --- 2. reactive lifecycle --------------------------------------------------
+
+test("plugin_tracks_family_background_activity", async () => {
+  const h = createHarness()
+  h.setState("sessions", {
+    ses_a: { title: "Parent", location: { directory: "/parent" } },
+    ses_child: { title: "Child", parentID: "ses_a", location: { directory: "/child" } },
+    ses_sibling: { parentID: "ses_a", location: { directory: "/parent" } },
+  })
+  h.setState("families", "ses_a", ["ses_a", "ses_child", "ses_sibling"])
+  h.setState("messages", "ses_a", [{ type: "assistant", content: [{ type: "text", text: "Started." }] }])
+  await plugin.setup(h.context)
+  h.mount()
+  try {
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Parent")
+
+    h.setState("statuses", "ses_child", "running")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Parent")
+    h.setState("statuses", "ses_child", "idle")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Parent")
+
+    // Background shells have an owner, but no required background flag.
+    const parentShell = { id: "sh_parent", status: "running", metadata: { sessionID: "ses_a" } }
+    const childShell = { id: "sh_child", status: "running", metadata: { sessionID: "ses_child" } }
+    h.setState("shells", "/parent", [parentShell])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Parent")
+    h.setState("statuses", "ses_child", "running")
+    h.setState("shells", "/parent", [])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Parent")
+    h.setState("shells", "/child", [childShell])
+    h.setState("statuses", "ses_child", "idle")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Parent")
+
+    h.setState("statuses", "ses_child", "running")
+    h.setState("shells", "/child", [])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Parent")
+    h.setState("statuses", "ses_child", "idle")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Parent")
+
+    for (const status of ["exited", "timeout", "killed"]) {
+      h.setState("shells", "/parent", [{ ...parentShell, status }])
+      flushTimers()
+      expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Parent")
+    }
+    h.setState("shells", "/parent", [
+      { id: "sh_other", status: "running", metadata: { sessionID: "ses_other" } },
+      { id: "sh_no_owner", status: "running", metadata: {} },
+      { id: "sh_bad_owner", status: "running", metadata: { sessionID: 123 } },
+    ])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Parent")
+    const beforeOtherSession = h.titles.length
+    h.setState("statuses", "ses_other", "running")
+    flushTimers()
+    expect(h.titles.length).toBe(beforeOtherSession)
+
+    // An idle child observes its running parent or siblings, not unrelated roots.
+    h.navigate({ type: "session", sessionID: "ses_child" })
+    h.setState("statuses", "ses_a", "running")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Child")
+    h.setState("statuses", "ses_a", "idle")
+    h.setState("statuses", "ses_sibling", "running")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Child")
+
+    // Any known family member needing input wins over background activity.
+    h.setState("permissions", "ses_a", [{ id: "per_parent" }])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Child")
+    h.setState("permissions", "ses_a", undefined)
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OC | Child")
+    h.setState("forms", "ses_sibling", [{ id: "frm_sibling" }])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Child")
+    h.setState("forms", "ses_sibling", undefined)
+    h.setState("statuses", "ses_sibling", "idle")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OC | Child")
+  } finally {
+    h.unmount()
+  }
+})
+
+test("plugin_tracks_family_background_activity_before_hydration", async () => {
+  const h = createHarness()
+  h.setState("statuses", "ses_child", "running")
+  await plugin.setup(h.context)
+  h.mount()
+  try {
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OpenCode")
+    h.setState("families", "ses_a", ["ses_child"])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+    h.setState("statuses", "ses_child", "idle")
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OpenCode")
+
+    const shell = { id: "sh_self", status: "running", metadata: { sessionID: "ses_a" } }
+    // The displayed session counts even when the family cache omits it.
+    h.setState("shells", "/plugin", [shell])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+    h.setState("sessions", "ses_a", { location: { directory: "/parent" } })
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OpenCode")
+    h.setState("shells", "/parent", [{ ...shell, metadata: { sessionID: "ses_child" } }])
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+  } finally {
+    h.unmount()
+  }
+
+  const withoutLocation = createHarness({ type: "session", sessionID: "ses_a" }, null)
+  withoutLocation.setState("shells", "/default", [
+    { id: "sh_self", status: "running", metadata: { sessionID: "ses_a" } },
+  ])
+  await plugin.setup(withoutLocation.context)
+  withoutLocation.mount()
+  try {
+    flushTimers()
+    expect(withoutLocation.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+  } finally {
+    withoutLocation.unmount()
+  }
+})
 
 test("plugin_reacts_to_local_state_and_disposes_pending_work", async () => {
   const h = createHarness()
@@ -380,6 +559,62 @@ test("plugin_reacts_to_local_state_and_disposes_pending_work", async () => {
 })
 
 // --- 3. persisted toggle + env opt-out --------------------------------------
+
+test("plugin_background_updates_preserve_title_lifecycle", async () => {
+  const h = createHarness()
+  h.setState("families", "ses_a", ["ses_a", "ses_child"])
+  h.setState("statuses", "ses_a", "running")
+  h.setState("messages", "ses_a", [{ type: "assistant", content: [{ type: "text" }] }])
+  await plugin.setup(h.context)
+  h.mount()
+  try {
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F534} OpenCode")
+    const beforeIdle = h.titles.length
+    h.setState("statuses", "ses_child", "running")
+    h.setState("statuses", "ses_a", "idle")
+    expect(pendingTimerCount()).toBe(1)
+    flushTimers()
+    expect(h.titles.length).toBe(beforeIdle + 1)
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+
+    await h.toggleCommand().run()
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("OpenCode")
+    await h.toggleCommand().run()
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+
+    h.navigate({ type: "session", sessionID: "ses_other" })
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E2} OpenCode")
+    const beforeFamilyUpdate = h.titles.length
+    h.setState("statuses", "ses_child", "idle")
+    expect(pendingTimerCount()).toBe(0)
+    flushTimers()
+    expect(h.titles.length).toBe(beforeFamilyUpdate)
+
+    h.navigate({ type: "session", sessionID: "ses_a" })
+    h.setState("statuses", "ses_child", "running")
+    h.navigate({ type: "home" })
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("OpenCode")
+
+    h.navigate({ type: "session", sessionID: "ses_a" })
+    flushTimers()
+    expect(h.titles.at(-1)).toBe("\u{1F7E1} OpenCode")
+    h.setState("statuses", "ses_child", "idle")
+    expect(pendingTimerCount()).toBe(1)
+    const beforeUnmount = [...h.titles]
+    h.unmount()
+    expect(pendingTimerCount()).toBe(0)
+    h.setState("statuses", "ses_child", "running")
+    flushTimers()
+    expect(h.titles).toEqual(beforeUnmount)
+  } finally {
+    h.unmount()
+  }
+})
 
 test("plugin_persists_toggle_and_honors_environment_opt_out", async () => {
   const h = createHarness()

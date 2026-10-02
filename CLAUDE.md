@@ -14,15 +14,16 @@ The entire plugin lives in `src/index.ts`. Key design:
 - **`formatSessionTitle(title, color)`** — Pure title formatter: `OpenCode` for blank titles, `OC | <title>` for named titles, legacy truncation over 40 UTF-16 code units to first 37 + `...`, emoji prefix unless disabled (disabled has no leading space — a V1 quirk intentionally dropped). Exported for tests.
 - **`Plugin.define({ id, setup })`** from `@opencode/plugin/tui` — V2 CLI plugin entrypoint. `setup` exits early when `OPENCODE_DISABLE_TERMINAL_TITLE=1`, creates the persisted toggle (`storage.store("traffic_light_enabled")`, plugin-scoped, does NOT migrate the V1 kv value), and registers a non-rendering `app` slot.
 - **Slot ownership** — The null-rendering slot exists so the keymap layer (palette command `traffic_light.toggle`) and the title `createEffect` are created under a Solid owner and disposed on plugin unload/hot-reload. Do not move them into `setup` itself: `setup` runs without a component owner.
-- **Title effect** — Reads route/session/messages/permissions/forms/storage reactively and computes the title synchronously; only the `renderer.setTerminalTitle` write is deferred with `setTimeout(fn, 0)` so it lands after OpenCode's own title effect, coalescing rapid changes into one write. The route is shallow-spread (`{ ...current() }`) so plugin-page name changes retrigger even though `type` stays `"plugin"`.
+- **Title effect** — Reads route/session/messages/family activity/permissions/forms/storage reactively and computes the title synchronously; only the `renderer.setTerminalTitle` write is deferred with `setTimeout(fn, 0)` so it lands after OpenCode's own title effect, coalescing rapid changes into one write. The route is shallow-spread (`{ ...current() }`) so plugin-page name changes retrigger even though `type` stays `"plugin"`.
+- **Background activity** — The optional pure-policy input `backgroundActive` derives from a different running member of `data.session.family(sessionID)` or a running shell owned by any member via `metadata.sessionID`. `family()` returns the whole root family, including parent/siblings when viewing a child; always include the displayed ID before hydration. Read shells at each owner's session location, falling back to the displayed session, plugin, then default location. Do not require `metadata.background` (shell-tool background execution does not supply it), parse tool output, or use `shell.listBySession` (not in the public plugin context). Pending permission/form lists are aggregated across the same family. Accuracy follows host cache hydration, not arbitrary detached OS processes or never-loaded locations.
 - **No event subscriptions, no polling** — the V2 client cache is reactive; updates flow through it. (V1 subscribed to 14 events; that machinery is gone.)
 
 ## Color Decision Priority (highest first)
 
 1. `enabled === false` → `null` (plain title still written, no emoji)
-2. Session idle or no status → 🟢 green
-3. No messages → 🟢 green
-4. Pending permission or form (V2 replacement for questions) → 🟢 green
+2. Pending permission or form (V2 replacement for questions) anywhere in the known family → 🟢 green
+3. Session idle or no status → 🟡 yellow if `backgroundActive`, otherwise 🟢 green
+4. No messages → 🟢 green (running foreground only)
 5. No assistant message or empty parts → 🟡 yellow
 6. Active tool part (`streaming`/`running`) in newest assistant message → 🔴 red
 7. Text part present in newest assistant message → 🔴 red (presence, not still-streaming — V1 parity)
